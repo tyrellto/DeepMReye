@@ -103,8 +103,11 @@ class RegressionBlock(nn.Module):
         outs = []
         for i in range(self.inner_timesteps):
             h = self.core(x[:, i])
-            if self.mc_dropout:
-                h = F.dropout(h, p=self.core[1].p, training=True)
+            h = F.dropout(
+                h,
+                p=self.core[1].p,
+                training=self.mc_dropout or self.training,
+            )
             outs.append(self.out(h).unsqueeze(1))
         return torch.cat(outs, dim=1)
 
@@ -120,9 +123,11 @@ class ConfidenceBlock(nn.Module):
 
     def forward(self, x):
         x = self.activation(self.fc1(x))
-        x = self.dropout(x)
-        if self.mc_dropout:
-            x = F.dropout(x, p=self.dropout.p, training=True)
+        x = F.dropout(
+            x,
+            p=self.dropout.p,
+            training=self.mc_dropout or self.training,
+        )
         return self.activation(self.fc2(x))
 
 
@@ -134,6 +139,7 @@ class StandardModel(nn.Module):
         act = nn.ReLU()
         self.activation = act
         self.gaussian_noise = opts.get("gaussian_noise", 0)
+        self.mc_dropout = opts.get("mc_dropout", False)
 
         channels, x, y, z = input_shape
 
@@ -180,7 +186,11 @@ class StandardModel(nn.Module):
             noise = torch.randn_like(x) * self.gaussian_noise
             x = x + noise
         x = self.first(x)
-        x = self.dropout(x)
+        x = F.dropout(
+            x,
+            p=self.dropout.p,
+            training=self.mc_dropout or self.training,
+        )
         x, _ = self.down(x)
         x = self.flatten(x)
         reg = self.regression(x)
