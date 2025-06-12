@@ -1,12 +1,10 @@
-import platform
 from os.path import join
 
 import numpy as np
 import pandas as pd
-import tensorflow as tf
-import tensorflow.keras.backend as K
+import torch
 
-from deepmreye import architecture
+from deepmreye import pytorch_architecture as architecture
 from deepmreye.util import data_generator, util
 
 
@@ -44,7 +42,7 @@ def train_model(
         Number of workers used when using multiprocessing, by default 4
     use_multiprocessing : bool, optional
         If multiprocessing should be used, can speed up training by 10x if data loader is bottleneck, by default True
-    models : Keras Model instance, optional
+    models : torch.nn.Module, optional
         Can be provided if already trained model should be used instead of training a new one, by default None
     return_untrained : bool, optional
         If true, returns untrained but compiled model, by default False
@@ -53,26 +51,14 @@ def train_model(
 
     Returns
     -------
-    model : Keras Model
-        Full model instance, used for training uncertainty estimate
-    model_inference : Keras Model
-        Model instance used for inference, provides uncertainty estimate (unsupervised model)
+    model : torch.nn.Module
+        Trained model instance
+    model_inference : torch.nn.Module
+        Model instance used for inference, provides uncertainty estimate
     """
-    # Disable multiprocessing on MacOS
-    is_mac = platform.system() == "Darwin"
-    is_arm = platform.machine() in ["arm64", "aarch64"]
-    if is_mac and is_arm:
-        if use_multiprocessing:
-            print("Apple Silicon detected - Multiprocessing is not supported. Disabling it.")
-        use_multiprocessing = False
-
-    # Clear session if needed
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if clear_graph:
-        K.clear_session()
-    if use_multiprocessing:
-        tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.ERROR)
-    else:
-        workers = 1
+        torch.cuda.empty_cache()
 
     # Unpack generators
     (
@@ -95,37 +81,48 @@ def train_model(
             f"Subjects in test set: {len(single_testing_generators)}"
         )
 
-    # Learning rate scheduler
-    lr_sched = util.step_decay_schedule(initial_lr=opts["lr"], decay_factor=0.9, num_epochs=opts["epochs"])
-
     # Get model
     if models is None:
-        model, model_inference = architecture.create_standard_model(X.shape[1::], opts)
+        model = architecture.StandardModel(X.shape[-1], opts).to(device)
     else:
-        model, model_inference = models
+        model = models
+    model_inference = model
     if return_untrained:
-        tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.INFO)
         return (model, model_inference)
 
-    # Train model
-    if verbose > 1:
-        print(model.summary(line_length=200))
-    model.fit(
-        training_generator,
-        steps_per_epoch=opts["steps_per_epoch"],
-        epochs=opts["epochs"],
-        validation_data=testing_generator,
-        validation_steps=opts["validation_steps"],
-        callbacks=[lr_sched],
-        use_multiprocessing=use_multiprocessing,
-        workers=workers,
-    )
+    optimizer = torch.optim.Adam(model.parameters(), lr=opts["lr"])
+    for epoch in range(opts["epochs"]):
+        model.train()
+        for _ in range(opts["steps_per_epoch"]):
+            (batch, _) = next(training_generator)
+            X_batch, y_batch = batch
+            X_batch = torch.from_numpy(X_batch).permute(0, 4, 1, 2, 3).float().to(device)
+            y_batch = torch.from_numpy(y_batch).float().to(device)
+
+            optimizer.zero_grad()
+            pred, conf = model(X_batch)
+            loss_euc, loss_conf = architecture.compute_standard_loss(conf, y_batch, pred)
+            loss = opts["loss_euclidean"] * loss_euc + opts["loss_confidence"] * loss_conf
+            loss.backward()
+            optimizer.step()
+
+        model.eval()
+        with torch.no_grad():
+            (val_batch, _) = next(testing_generator)
+            X_val, y_val = val_batch
+            X_val = torch.from_numpy(X_val).permute(0, 4, 1, 2, 3).float().to(device)
+            y_val = torch.from_numpy(y_val).float().to(device)
+            pred, conf = model(X_val)
+            loss_euc, loss_conf = architecture.compute_standard_loss(conf, y_val, pred)
+        if verbose > 0:
+            print(
+                f"Epoch {epoch + 1}/{opts['epochs']} - "
+                f"train loss {loss.item():.4f} - val euclidean {loss_euc.item():.4f}"
+            )
 
     # Save model weights
     if save:
-        model_inference.save_weights(join(model_path, f"modelinference_{dataset}.h5"))
-    if use_multiprocessing:
-        tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.INFO)
+        torch.save(model.state_dict(), join(model_path, f"modelinference_{dataset}.pth"))
 
     return (model, model_inference)
 
@@ -140,8 +137,8 @@ def evaluate_model(dataset, model, generators, save=False, model_path="./", mode
     ----------
     dataset : str
         Description of dataset, used for saving dataset to file
-    model : Keras Model
-        Full model instance, used for training uncertainty estimate
+    model : torch.nn.Module
+        Trained model instance
     generators : generator
         Cross validation, Hold out or Leave one out generator, yielding X,y pairs
     save : bool, optional
@@ -171,9 +168,14 @@ def evaluate_model(dataset, model, generators, save=False, model_path="./", mode
         full_training_list,
     ) = generators
     evaluation, scores = dict(), dict()
+    device = next(model.parameters()).device
     for idx, subj in enumerate(full_testing_list):
         X, real_y = data_generator.get_all_subject_data(subj)
-        (pred_y, euc_pred) = model.predict(X, verbose=verbose - 2, batch_size=16)
+        X_t = torch.from_numpy(X).permute(0, 4, 1, 2, 3).float().to(device)
+        with torch.no_grad():
+            pred_y_t, conf_t = model(X_t)
+        pred_y = pred_y_t.cpu().numpy()
+        euc_pred = conf_t.cpu().numpy()
         evaluation[subj] = {"real_y": real_y, "pred_y": pred_y, "euc_pred": euc_pred}
 
         # Quantify predictions
