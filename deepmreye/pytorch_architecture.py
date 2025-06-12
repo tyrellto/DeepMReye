@@ -129,13 +129,15 @@ class ConfidenceBlock(nn.Module):
 class StandardModel(nn.Module):
     """PyTorch implementation of the DeepMReye model."""
 
-    def __init__(self, input_channels, opts):
+    def __init__(self, input_shape, opts):
         super().__init__()
         act = nn.ReLU()
         self.activation = act
         self.gaussian_noise = opts.get("gaussian_noise", 0)
 
-        self.first = Conv3dBlock(input_channels, opts["filters"], opts["kernel"], 1, act)
+        channels, x, y, z = input_shape
+
+        self.first = Conv3dBlock(channels, opts["filters"], opts["kernel"], 1, act)
         self.dropout = nn.Dropout3d(opts["dropout_rate"])
 
         self.down = DownsampleBlock(
@@ -148,7 +150,13 @@ class StandardModel(nn.Module):
         )
 
         self.flatten = nn.Flatten()
-        bottleneck_features = self.down.out_channels
+
+        with torch.no_grad():
+            dummy = torch.zeros(1, channels, x, y, z)
+            h = self.first(dummy)
+            h = self.dropout(h)
+            h, _ = self.down(h)
+            bottleneck_features = int(h.flatten(1).shape[1])
         self.regression = RegressionBlock(
             in_features=bottleneck_features,
             num_dense=opts["num_dense"],

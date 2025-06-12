@@ -83,7 +83,8 @@ def train_model(
 
     # Get model
     if models is None:
-        model = architecture.StandardModel(X.shape[-1], opts).to(device)
+        input_shape = (X.shape[-1], X.shape[1], X.shape[2], X.shape[3])
+        model = architecture.StandardModel(input_shape, opts).to(device)
     else:
         model = models
     model_inference = model
