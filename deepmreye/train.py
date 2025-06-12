@@ -15,8 +15,6 @@ def train_model(
     clear_graph=True,
     save=False,
     model_path="./",
-    workers=4,
-    use_multiprocessing=True,
     models=None,
     return_untrained=False,
     verbose=0,
@@ -38,10 +36,6 @@ def train_model(
         If model weights should be saved to file, by default False
     model_path : str, optional
         Filepath to where model weights should be stored, by default './'
-    workers : int, optional
-        Number of workers used when using multiprocessing, by default 4
-    use_multiprocessing : bool, optional
-        If multiprocessing should be used, can speed up training by 10x if data loader is bottleneck, by default True
     models : torch.nn.Module, optional
         Can be provided if already trained model should be used instead of training a new one, by default None
     return_untrained : bool, optional
